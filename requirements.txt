@@ -1,0 +1,6 @@
+torch
+torchvision
+transformers==5.17.0
+huggingface_hub
+numpy
+streamlit
