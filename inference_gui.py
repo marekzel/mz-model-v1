@@ -54,15 +54,27 @@ if user_query := st.chat_input("Type a message..."):
 
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
-        formatted_prompt = f"<|user|>\n{user_query}\n<|assistant|>\n"
+
+        history_pool = st.session_state.messages[:-1]
+        recent_messages = history_pool[-2:] 
+
+        history_str = ""
+        for msg in recent_messages:
+            if msg["role"] == "user":
+                history_str += f"<|user|>\n{msg['content']}\n"
+            elif msg["role"] == "assistant":
+                history_str += f"<|assistant|>\n{msg['content']}\n"
+
+        formatted_prompt = f"{history_str}<|user|>\n{user_query}\n<|assistant|>\n"
+
         input_ids = tokenizer.encode(formatted_prompt).tolist()
         x = torch.tensor([input_ids], dtype=torch.long, device=device)
 
         generated_tokens = []
         eos_id = tokenizer.tokenizer.eos_token_id
-        temperature = 0.6
+        temperature = 0.5
         top_k = 30
-        repetition_penalty = 1.1
+        repetition_penalty = 1.2
 
         with torch.no_grad():
             for _ in range(120):
