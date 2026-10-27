@@ -46,47 +46,73 @@ for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
+col_space, col_clear = st.columns([8, 2])
+with col_clear:
+    if st.button("🗑️ Clear chat", use_container_width=True):
+        st.session_state.messages = []
+        st.rerun()
+
+
 if user_query := st.chat_input("Type a message..."):
+    st.session_state.messages.append(
+        {"role": "user", "content": user_query}
+    )
+
     with st.chat_message("user"):
         st.markdown(user_query)
-
-    st.session_state.messages.append({"role": "user", "content": user_query})
 
     with st.chat_message("assistant"):
         response_placeholder = st.empty()
 
         history_pool = st.session_state.messages[:-1]
-        recent_messages = history_pool[-2:] 
+        recent_messages = history_pool[-2:]
 
         history_str = ""
         for msg in recent_messages:
-            if msg["role"] == "user":
-                history_str += f"<|user|>\n{msg['content']}\n"
-            elif msg["role"] == "assistant":
-                history_str += f"<|assistant|>\n{msg['content']}\n"
+            role = msg["role"]
+            history_str += f"<|{role}|>\n{msg['content']}\n"
 
-        formatted_prompt = f"{history_str}<|user|>\n{user_query}\n<|assistant|>\n"
+        formatted_prompt = (
+            history_str
+            + f"<|user|>\n{user_query}\n"
+            + "<|assistant|>\n"
+        )
 
         input_ids = tokenizer.encode(formatted_prompt).tolist()
-        x = torch.tensor([input_ids], dtype=torch.long, device=device)
+        x = torch.tensor(
+            [input_ids], dtype=torch.long, device=device
+        )
 
         generated_tokens = []
         eos_id = tokenizer.tokenizer.eos_token_id
-        temperature = 0.5
+
+        temperature = 0.4
         top_k = 30
-        repetition_penalty = 1.2
+        repetition_penalty = 1.3
+        max_new_tokens = 120
 
-        with torch.no_grad():
-            for _ in range(120):
-                x_input = x[:, -512:] if x.size(1) > 512 else x
+        final_response = ""
 
-                if device.type == "cuda":
-                    with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        use_bf16 = (
+            device.type == "cuda"
+            and torch.cuda.is_bf16_supported()
+        )
+
+        with torch.inference_mode():
+            for _ in range(max_new_tokens):
+                x_input = x[:, -512:]
+
+                if use_bf16:
+                    with torch.amp.autocast(
+                        "cuda", dtype=torch.bfloat16
+                    ):
                         logits, _ = model(x_input)
                 else:
                     logits, _ = model(x_input)
 
-                next_token_logits = logits[:, -1, :] / temperature
+                next_token_logits = (
+                    logits[:, -1, :] / temperature
+                )
 
                 for token_id in set(generated_tokens):
                     if next_token_logits[0, token_id] > 0:
@@ -95,12 +121,18 @@ if user_query := st.chat_input("Type a message..."):
                         next_token_logits[0, token_id] *= repetition_penalty
 
                 if top_k > 0:
-                    topk_values, _ = torch.topk(next_token_logits, top_k)
-                    indices_to_remove = next_token_logits < topk_values[..., -1, None]
-                    next_token_logits[indices_to_remove] = float("-inf")
+                    k = min(top_k, next_token_logits.size(-1))
+                    topk_values, _ = torch.topk(
+                        next_token_logits, k
+                    )
+                    threshold = topk_values[..., -1, None]
+                    next_token_logits[
+                        next_token_logits < threshold
+                    ] = float("-inf")
 
                 probs = torch.softmax(next_token_logits, dim=-1)
                 next_token = torch.multinomial(probs, num_samples=1)
+
                 token_id = next_token.item()
 
                 if token_id == eos_id:
@@ -111,39 +143,29 @@ if user_query := st.chat_input("Type a message..."):
 
                 current_text = tokenizer.decode(generated_tokens)
 
-                stop_tags = ["<|user|>", "<|assistant|>"]
-
-                if any(tag in current_text for tag in stop_tags):
+                match = re.search(
+                    r"<\|(user|assistant)\|>", current_text
+                )
+                if match:
+                    current_text = current_text[:match.start()]
                     break
 
                 response_placeholder.markdown(current_text + "▌")
 
-                final_response = tokenizer.decode(generated_tokens).strip()
+        final_response = tokenizer.decode(generated_tokens).strip()
 
-                final_response = re.sub(
-                    r"<\|(?:user|assistant)(?:\|?)?$",
-                    "",
-                    final_response
-                ).strip()
+        match = re.search(
+            r"<\|(user|assistant)\|>", final_response
+        )
+        if match:
+            final_response = final_response[:match.start()].strip()
 
-                for tag in ["<|user|>", "<|assistant|>", "### User:", "### Assistant:"]:
-                    final_response = final_response.replace(tag, "")
+        if not final_response:
+            final_response = "[Empty response]"
 
-                while True:
-                    cleaned = final_response.strip()
-                    matched = False
-
-                    for prefix in ["Assistant:", "Assistant", "assistant:", "assistant"]:
-                        if cleaned.startswith(prefix):
-                            final_response = cleaned[len(prefix):].strip()
-                            matched = True
-                            break
-
-                    if not matched:
-                        break
-
-                response_placeholder.markdown(final_response)
+        response_placeholder.markdown(final_response)
 
     st.session_state.messages.append(
         {"role": "assistant", "content": final_response}
     )
+
